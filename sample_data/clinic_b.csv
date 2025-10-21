@@ -1,0 +1,4 @@
+patient_id,name,age,sex,visit_date,diagnosis_code
+P101,Fatima Noor,35,F,2024-01-18,HEADACHE
+P102,Bilal Hassan,28,M,2024-01-19,COLD
+P103,Ayesha Khan,50,F,2024-01-20,FLU

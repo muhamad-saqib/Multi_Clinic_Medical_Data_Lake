@@ -1,0 +1,4 @@
+patient_id,name,age,sex,visit_date,diagnosis_code
+P001,Ali Khan,25,M,2024-01-15,FLU
+P002,Sara Ahmed,30,F,2024-01-16,COLD
+P003,Raza Malik,45,M,2024-01-17,FEVER
