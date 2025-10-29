@@ -1,18 +1,16 @@
-import streamlit as st
+import gradio as gr
 import pandas as pd
 import sqlite3
-from anonymize import remove_pii
+import hashlib
+import plotly.express as px
+import plotly.io as pio
+import os
+from datetime import datetime
 
-# Page configuration
-st.set_page_config(page_title="Medical Data Lake", page_icon="🏥")
-
-DB_PATH = "data.db"
-
+# Database functions
 def init_database():
-    """Database tables create karein agar nahi hain to"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('medical_data.db')
     cursor = conn.cursor()
-    
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS patients (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,31 +23,33 @@ def init_database():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
     ''')
-    
     conn.commit()
     conn.close()
 
+def hash_id(raw_id):
+    return hashlib.sha256(str(raw_id).encode()).hexdigest()[:16]
+
+def remove_pii(df):
+    df = df.copy()
+    pii_columns = ['name', 'address', 'phone', 'email']
+    for col in pii_columns:
+        if col in df.columns:
+            df.drop(columns=[col], inplace=True)
+    if 'patient_id' in df.columns:
+        df['patient_hash'] = df['patient_id'].apply(hash_id)
+        df.drop(columns=['patient_id'], inplace=True)
+    return df
+
 def save_to_database(df, clinic_name):
-    """Data ko database mein save karein"""
-    conn = sqlite3.connect(DB_PATH)
-    
-    try:
-        # Clinic name add karein
-        df['clinic'] = clinic_name
-        
-        # Database mein save karein
-        df.to_sql('patients', conn, if_exists='append', index=False)
-        conn.commit()
-        return True
-    except Exception as e:
-        st.error(f"Error saving to database: {e}")
-        return False
-    finally:
-        conn.close()
+    conn = sqlite3.connect('medical_data.db')
+    df['clinic'] = clinic_name
+    df.to_sql('patients', conn, if_exists='append', index=False)
+    conn.commit()
+    conn.close()
+    return f"✅ Data saved successfully! {len(df)} records added."
 
 def load_from_database():
-    """Database se data load karein"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('medical_data.db')
     try:
         df = pd.read_sql("SELECT * FROM patients", conn)
         return df
@@ -61,137 +61,171 @@ def load_from_database():
 # Initialize database
 init_database()
 
-# Title
-st.title("🏥 Multi-Clinic Medical Research Data Lake")
-st.write("Secure platform for medical data analysis")
-
-# Sidebar for upload
-st.sidebar.header("📁 Data Upload")
-
-# File uploader
-uploaded_file = st.sidebar.file_uploader(
-    "Choose a CSV file", 
-    type=['csv'],
-    help="Upload patient data CSV file"
-)
-
-# Clinic name input
-clinic_name = st.sidebar.text_input(
-    "Clinic Name", 
-    value="Clinic_A",
-    help="Enter your clinic name"
-)
-
-# Main area
-if uploaded_file is not None:
-    # Read CSV file
-    df = pd.read_csv(uploaded_file)
+# Gradio Functions
+def process_file(file, clinic_name):
+    if file is None:
+        return "❌ Please upload a CSV file", None, None
     
-    st.subheader(f"📊 Data Preview for {clinic_name}")
-    st.write(f"Rows: {df.shape[0]}, Columns: {df.shape[1]}")
-    st.dataframe(df.head())
+    try:
+        # Read CSV
+        df = pd.read_csv(file.name)
+        
+        # Show original data
+        original_html = f"<h3>📊 Original Data Preview ({len(df)} records)</h3>"
+        original_html += df.head().to_html(classes='table table-striped', index=False)
+        
+        # Anonymize data
+        clean_df = remove_pii(df)
+        
+        # Show cleaned data
+        cleaned_html = f"<h3>🛡️ Anonymized Data</h3>"
+        cleaned_html += clean_df.head().to_html(classes='table table-striped', index=False)
+        
+        # Save to database
+        save_result = save_to_database(clean_df, clinic_name)
+        
+        return save_result, original_html, cleaned_html
     
-    # Show original columns
-    st.write("**Original Columns:**", list(df.columns))
+    except Exception as e:
+        return f"❌ Error: {str(e)}", None, None
+
+def show_analytics():
+    df = load_from_database()
     
-    # Anonymization preview
-    st.subheader("🛡️ Anonymization Preview")
-    cleaned_df = remove_pii(df)
-    st.write("**After removing personal information:**")
-    st.dataframe(cleaned_df.head())
-    st.write("**Final Columns for Database:**", list(cleaned_df.columns))
+    if df.empty:
+        return "<h3>📝 No data available</h3><p>Upload data to see analytics.</p>", None, None, None
     
-    # Data Ingestion Button
-    if st.sidebar.button("💾 Ingest Data into Database"):
-        with st.spinner('Data processing and saving...'):
-            # Anonymize data
-            final_df = remove_pii(df)
+    # Basic stats
+    stats_html = f"""
+    <div style='background: #f8f9fa; padding: 20px; border-radius: 10px;'>
+        <h3>📋 Database Overview</h3>
+        <p><strong>Total Records:</strong> {len(df)}</p>
+        <p><strong>Total Clinics:</strong> {df['clinic'].nunique()}</p>
+        <p><strong>Average Age:</strong> {df['age'].mean():.1f} years</p>
+        <p><strong>Unique Diagnoses:</strong> {df['diagnosis_code'].nunique()}</p>
+    </div>
+    """
+    
+    # Create charts
+    charts_html = "<h3>📊 Analytics Dashboard</h3>"
+    
+    # Age distribution chart
+    if 'age' in df.columns:
+        fig_age = px.histogram(df, x='age', title="Age Distribution", 
+                              color_discrete_sequence=['#267dff'])
+        age_chart = pio.to_html(fig_age, include_plotlyjs='cdn', div_id="age_chart")
+        charts_html += age_chart
+    
+    # Diagnosis chart
+    if 'diagnosis_code' in df.columns:
+        diagnosis_counts = df['diagnosis_code'].value_counts().reset_index()
+        diagnosis_counts.columns = ['Diagnosis', 'Count']
+        fig_diag = px.bar(diagnosis_counts, x='Diagnosis', y='Count', 
+                         title="Diagnosis Distribution", color='Count')
+        diag_chart = pio.to_html(fig_diag, include_plotlyjs=False, div_id="diag_chart")
+        charts_html += diag_chart
+    
+    # Clinic distribution
+    clinic_counts = df['clinic'].value_counts().reset_index()
+    clinic_counts.columns = ['Clinic', 'Count']
+    fig_clinic = px.pie(clinic_counts, values='Count', names='Clinic', 
+                       title="Patients per Clinic")
+    clinic_chart = pio.to_html(fig_clinic, include_plotlyjs=False, div_id="clinic_chart")
+    charts_html += clinic_chart
+    
+    # Data preview
+    data_html = f"<h3>💾 Current Database Data</h3>"
+    data_html += df.head(10).to_html(classes='table table-striped', index=False)
+    
+    return stats_html, charts_html, data_html, df
+
+def export_data():
+    df = load_from_database()
+    if df.empty:
+        return None, "❌ No data available for export"
+    
+    # Create CSV file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"medical_data_export_{timestamp}.csv"
+    df.to_csv(filename, index=False)
+    
+    return filename, "✅ Data exported successfully!"
+
+# Gradio Interface
+with gr.Blocks(theme=gr.themes.Soft(), title="Medical Data Lake") as demo:
+    gr.Markdown("# 🏥 Multi-Clinic Medical Data Lake")
+    gr.Markdown("**Secure platform for medical data analysis with patient privacy protection**")
+    
+    with gr.Tab("📁 Data Upload"):
+        with gr.Row():
+            with gr.Column():
+                file_input = gr.File(label="Upload CSV File", file_types=[".csv"])
+                clinic_input = gr.Textbox(label="Clinic Name", value="Clinic_A")
+                process_btn = gr.Button("💾 Process & Save Data", variant="primary")
             
-            # Debug information
-            st.write("🔍 Debug Info:")
-            st.write(f"Final DataFrame shape: {final_df.shape}")
-            st.write(f"Final Columns: {list(final_df.columns)}")
-            
-            # Save to database
-            success = save_to_database(final_df, clinic_name)
-            
-            if success:
-                st.sidebar.success("✅ Data successfully ingested!")
-                st.balloons()
-                
-                # Show saved data
-                saved_data = load_from_database()
-                st.subheader("💾 Saved Data in Database")
-                st.dataframe(saved_data)
-            else:
-                st.sidebar.error("❌ Failed to save data!")
+            with gr.Column():
+                result_output = gr.Textbox(label="Result", interactive=False)
+                original_preview = gr.HTML(label="Original Data Preview")
+                cleaned_preview = gr.HTML(label="Anonymized Data Preview")
+        
+        process_btn.click(
+            fn=process_file,
+            inputs=[file_input, clinic_input],
+            outputs=[result_output, original_preview, cleaned_preview]
+        )
+    
+    with gr.Tab("📊 Analytics"):
+        refresh_btn = gr.Button("🔄 Refresh Analytics", variant="secondary")
+        
+        stats_output = gr.HTML(label="Statistics")
+        charts_output = gr.HTML(label="Charts")
+        data_output = gr.HTML(label="Database Preview")
+        analytics_df = gr.Dataframe(label="Full Data", interactive=False)
+        
+        refresh_btn.click(
+            fn=show_analytics,
+            outputs=[stats_output, charts_output, data_output, analytics_df]
+        )
+    
+    with gr.Tab("📥 Export"):
+        export_btn = gr.Button("📄 Export Data to CSV", variant="primary")
+        export_result = gr.Textbox(label="Export Result", interactive=False)
+        export_file = gr.File(label="Download Exported Data", interactive=False)
+        
+        export_btn.click(
+            fn=export_data,
+            outputs=[export_file, export_result]
+        )
+    
+    with gr.Tab("ℹ️ Instructions"):
+        gr.Markdown("""
+        ## 📋 How to Use
+        
+        ### 1. Data Upload
+        - Upload a CSV file with patient data
+        - Expected columns: `patient_id, name, age, sex, visit_date, diagnosis_code`
+        - Enter your clinic name
+        
+        ### 2. Data Processing
+        - System automatically removes personal information
+        - Patient IDs are hashed for privacy
+        - Data is saved to secure database
+        
+        ### 3. Analytics
+        - View interactive charts and statistics
+        - Monitor age distribution, diagnosis patterns
+        - Track multiple clinics
+        
+        ### 4. Export
+        - Download processed data as CSV
+        - Generate reports for research
+        
+        ## 🔒 Privacy Features
+        - Automatic PII removal
+        - Secure patient ID hashing
+        - Local data processing
+        """)
 
-else:
-    st.info("👆 Please upload a CSV file to get started")
-    st.write("**Expected columns:** patient_id, name, age, sex, visit_date, diagnosis_code")
-
-# Load existing data for dashboard
-existing_data = load_from_database()
-
-if not existing_data.empty:
-    st.sidebar.markdown("---")
-    st.sidebar.header("📈 Dashboard")
-    
-    st.subheader("📊 Database Overview")
-    st.write(f"Total Records: {len(existing_data)}")
-    st.write(f"Total Clinics: {existing_data['clinic'].nunique()}")
-    
-    # Show all data
-    st.write("**All Data in Database:**")
-    st.dataframe(existing_data)
-else:
-    st.info("📝 No data in database yet. Upload a CSV file to get started!")
-    
-if not existing_data.empty:
-    st.markdown("---")
-    st.subheader("📈 Analytics Dashboard")
-    
-    # Two columns for charts
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("**Age Distribution**")
-        if 'age' in existing_data.columns:
-            # Simple age chart
-            age_chart_data = existing_data['age'].value_counts().sort_index()
-            st.bar_chart(age_chart_data)
-        else:
-            st.info("Age data not available")
-    
-    with col2:
-        st.write("**Diagnosis Distribution**")
-        if 'diagnosis_code' in existing_data.columns:
-            # Simple diagnosis chart
-            diagnosis_chart_data = existing_data['diagnosis_code'].value_counts()
-            st.bar_chart(diagnosis_chart_data)
-        else:
-            st.info("Diagnosis data not available")
-    
-    # Clinic-wise data
-    st.write("**Clinic-wise Records**")
-    clinic_data = existing_data['clinic'].value_counts()
-    st.bar_chart(clinic_data)
-    
-    # Data summary
-    st.write("**Data Summary**")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Total Patients", len(existing_data))
-    
-    with col2:
-        st.metric("Total Clinics", existing_data['clinic'].nunique())
-    
-    with col3:
-        if 'age' in existing_data.columns:
-            avg_age = existing_data['age'].mean()
-            st.metric("Average Age", f"{avg_age:.1f} years")
-
-# Footer
-st.sidebar.markdown("---")
-st.sidebar.info("🔒 Patient privacy protected with secure hashing")
+# Launch app
+if __name__ == "__main__":
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
